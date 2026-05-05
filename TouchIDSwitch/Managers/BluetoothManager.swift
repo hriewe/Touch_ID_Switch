@@ -264,29 +264,57 @@ final class BluetoothManager: NSObject, ObservableObject {
     // MARK: - Connect / Disconnect
 
     func connectDevice(_ device: TrackedDevice) async throws {
-        // Try IOBluetooth first (Classic BT).
+        if let path = blueutilPath {
+            if blueutilConnectionState(device, path: path) == true {
+                return
+            }
+
+            let status = runBlueutil(path, args: ["--connect", device.macAddress])
+            if status == 0,
+               await waitForBlueutilConnectionState(device, path: path, expected: true, timeout: 10) {
+                return
+            }
+
+            // A second state check catches blueutil builds that return before HID attach completes.
+            if await waitForBlueutilConnectionState(device, path: path, expected: true, timeout: 3) {
+                return
+            }
+
+            throw BluetoothError.connectionFailed(device.name, status)
+        }
+
+        // IOBluetooth is a fallback for Classic Bluetooth devices.
         if let bt = IOBluetoothDevice(addressString: device.macAddress),
            bt.openConnection() == kIOReturnSuccess { return }
 
-        // Fall back to blueutil (BLE devices like Magic Keyboard / Magic Mouse).
-        guard let path = blueutilPath else {
-            throw BluetoothError.bleRequiresBlueutil(device.name)
-        }
-        try runBlueutil(path, args: ["--connect", device.macAddress],
-                        onFailure: BluetoothError.connectionFailed(device.name, 0))
+        throw BluetoothError.bleRequiresBlueutil(device.name)
     }
 
     func disconnectDevice(_ device: TrackedDevice) async throws {
-        // Try IOBluetooth first (Classic BT).
+        if let path = blueutilPath {
+            if blueutilConnectionState(device, path: path) == false {
+                return
+            }
+
+            let status = runBlueutil(path, args: ["--disconnect", device.macAddress])
+            if status == 0,
+               await waitForBlueutilConnectionState(device, path: path, expected: false, timeout: 10) {
+                return
+            }
+
+            // If the command returned an error but the state still changed, treat it as success.
+            if blueutilConnectionState(device, path: path) == false {
+                return
+            }
+
+            throw BluetoothError.disconnectionFailed(device.name, status)
+        }
+
+        // IOBluetooth is a fallback for Classic Bluetooth devices.
         if let bt = IOBluetoothDevice(addressString: device.macAddress),
            bt.closeConnection() == kIOReturnSuccess { return }
 
-        // Fall back to blueutil (BLE devices like Magic Keyboard / Magic Mouse).
-        guard let path = blueutilPath else {
-            throw BluetoothError.bleRequiresBlueutil(device.name)
-        }
-        try runBlueutil(path, args: ["--disconnect", device.macAddress],
-                        onFailure: BluetoothError.disconnectionFailed(device.name, 0))
+        throw BluetoothError.bleRequiresBlueutil(device.name)
     }
 
     // MARK: - Unpair
@@ -309,8 +337,10 @@ final class BluetoothManager: NSObject, ObservableObject {
             throw BluetoothError.unpairUnavailable(device.name)
         }
         print("[BluetoothManager] Unpairing \(device.name) via blueutil fallback")
-        try runBlueutil(path, args: ["--unpair", device.macAddress],
-                        onFailure: BluetoothError.unpairFailed(device.name, 0))
+        let status = runBlueutil(path, args: ["--unpair", device.macAddress])
+        guard status == 0 else {
+            throw BluetoothError.unpairFailed(device.name, status)
+        }
     }
 
     // MARK: - Batch Operations
@@ -330,19 +360,19 @@ final class BluetoothManager: NSObject, ObservableObject {
     func connectAllTracked() async {
         for device in trackedDevices {
             var succeeded = false
-            for attempt in 1...3 {
+            for attempt in 1...5 {
                 do {
                     try await connectDevice(device)
                     succeeded = true
                     break
                 } catch {
-                    if attempt < 3 {
-                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    if attempt < 5 {
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
                     }
                 }
             }
             if !succeeded {
-                await setError("Failed to connect \(device.name) after 3 attempts")
+                await setError("Failed to connect \(device.name) after 5 attempts")
             }
         }
         updateStatuses()
@@ -406,13 +436,50 @@ final class BluetoothManager: NSObject, ObservableObject {
         return DeviceDiscoveryResult(devices: [], message: message)
     }
 
-    private func runBlueutil(_ path: String, args: [String], onFailure: BluetoothError) throws {
+    private func runBlueutil(_ path: String, args: [String]) -> IOReturn {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = args
-        try p.run()
+        guard (try? p.run()) != nil else { return -1 }
         p.waitUntilExit()
-        guard p.terminationStatus == 0 else { throw onFailure }
+        return p.terminationStatus
+    }
+
+    private func runBlueutilWithOutput(_ path: String, args: [String]) -> (status: IOReturn, output: String) {
+        let out = Pipe()
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        p.standardOutput = out
+        guard (try? p.run()) != nil else { return (-1, "") }
+        p.waitUntilExit()
+        let output = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return (p.terminationStatus, output)
+    }
+
+    private func blueutilConnectionState(_ device: TrackedDevice, path: String) -> Bool? {
+        let result = runBlueutilWithOutput(path, args: ["--is-connected", device.macAddress])
+        guard result.status == 0 else { return nil }
+        if result.output == "1" { return true }
+        if result.output == "0" { return false }
+        return nil
+    }
+
+    private func waitForBlueutilConnectionState(
+        _ device: TrackedDevice,
+        path: String,
+        expected: Bool,
+        timeout: TimeInterval
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if blueutilConnectionState(device, path: path) == expected {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        return false
     }
 
     // MARK: - Helpers
