@@ -182,7 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
             let delay = UInt64(settingsStore.switchDelay * 1_000_000_000)
             try? await Task.sleep(nanoseconds: delay)
-            await bluetoothManager.connectAllTracked(maxAttempts: 1)
+            await bluetoothManager.acceptIncomingHandoff()
         }
     }
 }

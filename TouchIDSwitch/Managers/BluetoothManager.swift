@@ -377,6 +377,24 @@ final class BluetoothManager: NSObject, ObservableObject {
         updateStatuses()
     }
 
+    func acceptIncomingHandoff(timeout: TimeInterval = 20) async {
+        for device in trackedDevices {
+            guard let path = blueutilPath else {
+                await setError(BluetoothError.bleRequiresBlueutil(device.name).localizedDescription)
+                continue
+            }
+
+            print("[BluetoothManager] Waiting for passive handoff of \(device.name)")
+            if await waitForStableBlueutilConnectionState(device, path: path, expected: true, timeout: timeout) {
+                print("[BluetoothManager] \(device.name) arrived via passive handoff")
+            } else {
+                print("[BluetoothManager] Passive handoff timed out for \(device.name)")
+                await setError("Timed out waiting for \(device.name) to connect")
+            }
+        }
+        updateStatuses()
+    }
+
     func connectAllTracked(maxAttempts: Int = 5) async {
         for device in trackedDevices {
             var succeeded = false
