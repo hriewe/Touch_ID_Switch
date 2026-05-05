@@ -1,0 +1,43 @@
+name: TouchIDSwitch
+options:
+  bundleIdPrefix: com.hriewe
+  deploymentTarget:
+    macOS: "12.0"
+  xcodeVersion: "15.0"
+
+targets:
+  TouchIDSwitch:
+    type: application
+    platform: macOS
+    deploymentTarget: "12.0"
+    sources:
+      - path: TouchIDSwitch
+    info:
+      path: TouchIDSwitch/Info.plist
+      properties:
+        LSUIElement: true
+        NSBonjourServices:
+          - _touchidswitch._tcp
+        NSBluetoothAlwaysUsageDescription: "Touch ID Switch needs Bluetooth access to connect and disconnect your Magic Keyboard and Mouse between two Macs."
+        NSLocalNetworkUsageDescription: "Touch ID Switch uses the local network to signal your other Mac when you switch devices."
+    entitlements:
+      path: TouchIDSwitch/TouchIDSwitch.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hriewe.TouchIDSwitch
+        SWIFT_OBJC_BRIDGING_HEADER: TouchIDSwitch/TouchIDSwitch-Bridging-Header.h
+        SWIFT_VERSION: "5.0"
+        MACOSX_DEPLOYMENT_TARGET: "12.0"
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+      configs:
+        Debug:
+          DEBUG_INFORMATION_FORMAT: dwarf
+        Release:
+          DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+    frameworks:
+      - sdk: IOBluetooth.framework
+      - sdk: CoreBluetooth.framework
+      - sdk: ServiceManagement.framework
+      - sdk: Security.framework

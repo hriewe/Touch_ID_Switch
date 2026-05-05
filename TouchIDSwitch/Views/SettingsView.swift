@@ -15,7 +15,6 @@ struct SettingsView: View {
             .frame(width: 420, height: 520)
             .onAppear {
                 secretFieldText = settings.sharedSecret
-                availableDevices = bluetoothManager.fetchPairedDevices()
             }
     }
 
@@ -59,7 +58,10 @@ struct SettingsView: View {
                 }
             }
 
-            Button(action: { showingDevicePicker = true }) {
+            Button(action: {
+                availableDevices = bluetoothManager.fetchPairedDevices()
+                showingDevicePicker = true
+            }) {
                 Label("Add Device…", systemImage: "plus")
             }
             .sheet(isPresented: $showingDevicePicker) {
@@ -67,6 +69,7 @@ struct SettingsView: View {
                     available: availableDevices.filter { av in
                         !bluetoothManager.trackedDevices.contains(av)
                     },
+                    allFound: availableDevices,
                     onSelect: { device in
                         bluetoothManager.addTrackedDevice(device)
                         showingDevicePicker = false
@@ -148,8 +151,16 @@ struct SettingsView: View {
 
 struct DevicePickerSheet: View {
     let available: [TrackedDevice]
+    let allFound: [TrackedDevice]
     let onSelect: (TrackedDevice) -> Void
     let onDismiss: () -> Void
+
+    private var emptyMessage: String {
+        if allFound.isEmpty {
+            return "No paired Bluetooth devices found. Make sure your devices are paired in System Settings → Bluetooth."
+        }
+        return "All paired devices are already tracked."
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -164,7 +175,7 @@ struct DevicePickerSheet: View {
             Divider()
 
             if available.isEmpty {
-                Text("All paired devices are already tracked.")
+                Text(emptyMessage)
                     .foregroundColor(.secondary)
                     .padding()
             } else {
