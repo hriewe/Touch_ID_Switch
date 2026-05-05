@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Bluetooth access -->
+    <key>com.apple.security.device.bluetooth</key>
+    <true/>
+
+    <!-- Outbound TCP connections (sending switch commands to peer) -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- Inbound TCP connections (receiving switch commands from peer) -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!-- Temporary exception: required to use IOBluetooth private API (removeFromFavorites).
+         Remove if you ship only the blueutil fallback path. -->
+    <key>com.apple.security.temporary-exception.apple-events</key>
+    <array>
+        <string>com.apple.bluetoothUIServer</string>
+    </array>
+</dict>
+</plist>
