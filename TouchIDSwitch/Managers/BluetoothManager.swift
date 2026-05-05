@@ -357,6 +357,22 @@ final class BluetoothManager: NSObject, ObservableObject {
         }
     }
 
+    func holdTrackedDisconnectedForHandoff(duration: TimeInterval = 15) async {
+        let devices = trackedDevices
+        guard !devices.isEmpty else { return }
+
+        let deadline = Date().addingTimeInterval(duration)
+        while Date() < deadline {
+            for device in devices {
+                guard let path = blueutilPath,
+                      blueutilConnectionState(device, path: path) == true else { continue }
+                _ = runBlueutil(path, args: ["--disconnect", device.macAddress])
+            }
+            try? await Task.sleep(nanoseconds: 750_000_000)
+        }
+        updateStatuses()
+    }
+
     func connectAllTracked() async {
         for device in trackedDevices {
             var succeeded = false

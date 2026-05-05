@@ -152,6 +152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let addresses = bluetoothManager.trackedDevices.map(\.macAddress)
             do {
                 try await networkManager.sendConnectCommand(devices: addresses)
+                Task { await bluetoothManager.holdTrackedDisconnectedForHandoff() }
             } catch {
                 await MainActor.run { bluetoothManager.lastError = error.localizedDescription }
             }
