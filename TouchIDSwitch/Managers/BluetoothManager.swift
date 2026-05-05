@@ -23,6 +23,11 @@ final class BluetoothManager: NSObject, ObservableObject {
     private var statusTimer: Timer?
     private let userDefaultsKey = "trackedDevicesV2"
 
+    struct DeviceDiscoveryResult {
+        let devices: [TrackedDevice]
+        let message: String?
+    }
+
     override init() {
         super.init()
         loadTrackedDevices()
@@ -58,15 +63,47 @@ final class BluetoothManager: NSObject, ObservableObject {
     // MARK: - Discovery
 
     func fetchPairedDevices() -> [TrackedDevice] {
-        // 1. blueutil: covers Classic BT + BLE, requires external install.
+        discoverPairedDevices(reportDiagnostics: false).devices
+    }
+
+    func fetchPairedDevicesForPicker() -> DeviceDiscoveryResult {
+        discoverPairedDevices(reportDiagnostics: true)
+    }
+
+    private func discoverPairedDevices(reportDiagnostics: Bool) -> DeviceDiscoveryResult {
+        var notes: [String] = []
+
         if let path = blueutilPath {
-            let devices = fetchViaBlueutil(path)
-            if !devices.isEmpty { return devices }
+            let result = fetchViaBlueutil(path)
+            if !result.devices.isEmpty { return result }
+            if reportDiagnostics, let note = result.message { notes.append(note) }
+        } else if reportDiagnostics {
+            notes.append("blueutil is not installed.")
         }
-        // 2. system_profiler: built-in, covers Classic BT + BLE.
-        let spDevices = fetchViaSystemProfiler()
-        if !spDevices.isEmpty { return spDevices }
-        // 3. IOBluetooth: Classic BT only — will not find Magic Keyboard/Mouse.
+
+        let spResult = fetchViaSystemProfiler()
+        if !spResult.devices.isEmpty { return spResult }
+        if reportDiagnostics, let note = spResult.message { notes.append(note) }
+
+        let ioRegResult = fetchViaIORegConnectedHID()
+        if !ioRegResult.devices.isEmpty { return ioRegResult }
+        if reportDiagnostics, let note = ioRegResult.message { notes.append(note) }
+
+        let ioBluetoothDevices = fetchViaIOBluetooth()
+        if !ioBluetoothDevices.isEmpty {
+            return DeviceDiscoveryResult(devices: ioBluetoothDevices, message: nil)
+        }
+        if reportDiagnostics {
+            notes.append("IOBluetooth did not return any paired devices.")
+        }
+
+        let message = reportDiagnostics && !notes.isEmpty
+            ? notes.joined(separator: " ")
+            : nil
+        return DeviceDiscoveryResult(devices: [], message: message)
+    }
+
+    private func fetchViaIOBluetooth() -> [TrackedDevice] {
         guard let paired = IOBluetoothDevice.pairedDevices() else { return [] }
         return paired.compactMap { obj -> TrackedDevice? in
             guard let device = obj as? IOBluetoothDevice,
@@ -77,18 +114,32 @@ final class BluetoothManager: NSObject, ObservableObject {
         }
     }
 
-    private func fetchViaSystemProfiler() -> [TrackedDevice] {
+    private func fetchViaSystemProfiler() -> DeviceDiscoveryResult {
         let out = Pipe(), err = Pipe()
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
         p.arguments = ["SPBluetoothDataType", "-json"]
         p.standardOutput = out
         p.standardError = err
-        guard (try? p.run()) != nil else { return [] }
+        guard (try? p.run()) != nil else {
+            return DeviceDiscoveryResult(
+                devices: [],
+                message: "system_profiler failed to launch."
+            )
+        }
         p.waitUntilExit()
         let data = out.fileHandleForReading.readDataToEndOfFile()
+        let errorData = err.fileHandleForReading.readDataToEndOfFile()
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let btArray = json["SPBluetoothDataType"] as? [[String: Any]] else { return [] }
+              let btArray = json["SPBluetoothDataType"] as? [[String: Any]] else {
+            let stderr = String(data: errorData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return DeviceDiscoveryResult(
+                devices: [],
+                message: "system_profiler returned unreadable Bluetooth data." +
+                    (stderr?.isEmpty == false ? " \(stderr!)" : "")
+            )
+        }
 
         var devices: [TrackedDevice] = []
         // Device lists appear under different keys across macOS versions.
@@ -107,6 +158,76 @@ final class BluetoothManager: NSObject, ObservableObject {
                 }
             }
         }
+        if !devices.isEmpty {
+            return DeviceDiscoveryResult(devices: devices, message: nil)
+        }
+
+        let stderr = String(data: errorData, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var message = "system_profiler returned no Bluetooth devices."
+        if let stderr, !stderr.isEmpty {
+            message += " \(stderr)"
+        }
+        return DeviceDiscoveryResult(devices: [], message: message)
+    }
+
+    private func fetchViaIORegConnectedHID() -> DeviceDiscoveryResult {
+        let out = Pipe(), err = Pipe()
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/sbin/ioreg")
+        p.arguments = ["-r", "-l", "-w", "0", "-c", "AppleDeviceManagementHIDEventService"]
+        p.standardOutput = out
+        p.standardError = err
+        guard (try? p.run()) != nil else {
+            return DeviceDiscoveryResult(
+                devices: [],
+                message: "ioreg failed to launch."
+            )
+        }
+        p.waitUntilExit()
+
+        let stdout = String(
+            data: out.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        ) ?? ""
+        let stderr = String(
+            data: err.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        )?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let devices = parseIORegBluetoothHID(stdout)
+        if !devices.isEmpty {
+            return DeviceDiscoveryResult(devices: devices, message: nil)
+        }
+
+        var message = "ioreg did not report any connected Bluetooth HID devices."
+        if let stderr, !stderr.isEmpty {
+            message += " \(stderr)"
+        }
+        return DeviceDiscoveryResult(devices: [], message: message)
+    }
+
+    private func parseIORegBluetoothHID(_ output: String) -> [TrackedDevice] {
+        let blocks = output.components(separatedBy: "\n\n")
+        var devices: [TrackedDevice] = []
+
+        for block in blocks {
+            guard block.contains("\"Transport\" = \"Bluetooth\"") ||
+                    block.contains("\"BluetoothDevice\" = Yes") else { continue }
+
+            guard let name = matchFirst(in: block, pattern: #""Product" = "([^"]+)""#),
+                  let address = matchFirst(in: block, pattern: #""DeviceAddress" = "([^"]+)""#)
+            else { continue }
+
+            let normalized = address
+                .replacingOccurrences(of: "-", with: ":")
+                .lowercased()
+            let device = TrackedDevice(name: name, macAddress: normalized, status: .connected)
+            if !devices.contains(device) {
+                devices.append(device)
+            }
+        }
+
         return devices
     }
 
@@ -125,14 +246,16 @@ final class BluetoothManager: NSObject, ObservableObject {
     }
 
     private func updateStatuses() {
-        let all = fetchPairedDevices()
-        DispatchQueue.main.async { [weak self] in
+        DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            for i in self.trackedDevices.indices {
-                if let fresh = all.first(where: { $0.macAddress == self.trackedDevices[i].macAddress }) {
-                    self.trackedDevices[i].status = fresh.status
-                } else {
-                    self.trackedDevices[i].status = .unknown
+            let all = self.fetchPairedDevices()
+            DispatchQueue.main.async {
+                for i in self.trackedDevices.indices {
+                    if let fresh = all.first(where: { $0.macAddress == self.trackedDevices[i].macAddress }) {
+                        self.trackedDevices[i].status = fresh.status
+                    } else {
+                        self.trackedDevices[i].status = .unknown
+                    }
                 }
             }
         }
@@ -174,7 +297,7 @@ final class BluetoothManager: NSObject, ObservableObject {
         }
 
         // Strategy 1: private API
-        let sel = Selector(("removeFromFavorites"))
+        let sel = #selector(IOBluetoothDevice.removeFromFavorites)
         if bt.responds(to: sel) {
             print("[BluetoothManager] Unpairing \(device.name) via private API removeFromFavorites")
             bt.perform(sel)
@@ -238,22 +361,49 @@ final class BluetoothManager: NSObject, ObservableObject {
         let isConnected: Bool
     }
 
-    private func fetchViaBlueutil(_ path: String) -> [TrackedDevice] {
+    private func fetchViaBlueutil(_ path: String) -> DeviceDiscoveryResult {
         let out = Pipe(), err = Pipe()
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = ["--paired", "--format", "json"]
         p.standardOutput = out
         p.standardError = err
-        guard (try? p.run()) != nil else { return [] }
+        guard (try? p.run()) != nil else {
+            return DeviceDiscoveryResult(
+                devices: [],
+                message: "blueutil failed to launch."
+            )
+        }
         p.waitUntilExit()
         let data = out.fileHandleForReading.readDataToEndOfFile()
-        let parsed = (try? JSONDecoder().decode([BlueutilDevice].self, from: data)) ?? []
-        return parsed.compactMap { d in
+        let errorData = err.fileHandleForReading.readDataToEndOfFile()
+        let parsed: [BlueutilDevice] =
+            (try? JSONDecoder().decode([BlueutilDevice].self, from: data)) ?? []
+        let devices: [TrackedDevice] = parsed.compactMap { d -> TrackedDevice? in
             guard let name = d.name, !name.isEmpty else { return nil }
             return TrackedDevice(name: name, macAddress: d.address,
                                  status: d.isConnected ? .connected : .disconnected)
         }
+        if !devices.isEmpty {
+            return DeviceDiscoveryResult(devices: devices, message: nil)
+        }
+
+        let stdout = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let stderr = String(data: errorData, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var message = "blueutil returned no paired devices"
+        if p.terminationStatus != 0 {
+            message += " (exit \(p.terminationStatus))"
+        }
+        if let stderr, !stderr.isEmpty {
+            message += ". \(stderr)"
+        } else if let stdout, !stdout.isEmpty {
+            message += ". Output: \(stdout)"
+        } else {
+            message += "."
+        }
+        return DeviceDiscoveryResult(devices: [], message: message)
     }
 
     private func runBlueutil(_ path: String, args: [String], onFailure: BluetoothError) throws {
@@ -270,6 +420,14 @@ final class BluetoothManager: NSObject, ObservableObject {
     @MainActor
     private func setError(_ message: String) {
         lastError = message
+    }
+
+    private func matchFirst(in text: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(text.startIndex..., in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              let captureRange = Range(match.range(at: 1), in: text) else { return nil }
+        return String(text[captureRange])
     }
 }
 

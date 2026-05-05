@@ -5,6 +5,8 @@
 ## User settings
 xcuserdata/
 DerivedData/
+.derivedData/
+.clang-module-cache/
 *.xccheckout
 *.moved-aside
 

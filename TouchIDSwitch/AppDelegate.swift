@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     let bluetoothManager = BluetoothManager()
     let networkManager = NetworkManager()
@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private var eventMonitor: Any?
+    private var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory) // belt-and-suspenders with LSUIElement
@@ -48,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         button.action = #selector(togglePopover(_:))
         button.target = self
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
     }
 
     // MARK: - Popover
@@ -57,7 +59,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentSize = NSSize(width: 320, height: 440)
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(
-            rootView: PopoverView()
+            rootView: PopoverView(
+                onPerformSwitch: { [weak self] direction in
+                    guard let self else { return }
+                    await self.performSwitch(direction: direction)
+                }
+            )
                 .environmentObject(bluetoothManager)
                 .environmentObject(networkManager)
                 .environmentObject(settingsStore)
@@ -66,6 +73,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func togglePopover(_ sender: Any?) {
         guard let button = statusItem.button else { return }
+
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            openSettingsWindow()
+            return
+        }
+
         if popover.isShown {
             closePopover()
         } else {
@@ -85,6 +98,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSEvent.removeMonitor(monitor)
             eventMonitor = nil
         }
+    }
+
+    @objc func openSettingsWindow() {
+        if settingsWindow == nil {
+            let rootView = SettingsView()
+                .environmentObject(bluetoothManager)
+                .environmentObject(networkManager)
+                .environmentObject(settingsStore)
+            let hostingController = NSHostingController(rootView: rootView)
+
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 460, height: 560),
+                styleMask: [.titled, .closable, .miniaturizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "Touch ID Switch Settings"
+            window.contentViewController = hostingController
+            window.isReleasedWhenClosed = false
+            window.level = .floating
+            window.collectionBehavior = [.moveToActiveSpace]
+            window.delegate = self
+            window.center()
+            window.setFrameAutosaveName("TouchIDSwitchSettings")
+            settingsWindow = window
+        }
+
+        closePopover()
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
+        settingsWindow?.orderFrontRegardless()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              window === settingsWindow else { return }
+        NSApp.setActivationPolicy(.accessory)
     }
 
     // MARK: - Switch Logic

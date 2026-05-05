@@ -1,18 +1,31 @@
 import SwiftUI
 
 struct SettingsView: View {
+    enum DisplayMode {
+        case window
+        case popover
+    }
+
     @EnvironmentObject var bluetoothManager: BluetoothManager
     @EnvironmentObject var networkManager: NetworkManager
     @EnvironmentObject var settings: SettingsStore
 
+    let displayMode: DisplayMode
+
     @State private var showingDevicePicker = false
     @State private var availableDevices: [TrackedDevice] = []
+    @State private var pickerMessage: String?
     @State private var secretFieldText: String = ""
     @State private var secretSaved = false
+    @State private var isLoadingDevices = false
+
+    init(displayMode: DisplayMode = .window) {
+        self.displayMode = displayMode
+    }
 
     var body: some View {
         formContent
-            .frame(width: 420, height: 520)
+            .frame(width: 420, height: displayMode == .window ? 520 : 500)
             .onAppear {
                 secretFieldText = settings.sharedSecret
             }
@@ -20,7 +33,9 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var formContent: some View {
-        if #available(macOS 13.0, *) {
+        if displayMode == .popover {
+            popoverContent
+        } else if #available(macOS 13.0, *) {
             Form {
                 devicesSection
                 networkSection
@@ -38,10 +53,39 @@ struct SettingsView: View {
         }
     }
 
+    private var popoverContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                GroupBox("Tracked Devices") {
+                    devicesContent
+                }
+
+                GroupBox("Network") {
+                    networkContent
+                }
+
+                GroupBox("Switch Behavior") {
+                    switchContent
+                }
+
+                GroupBox("Startup") {
+                    launchContent
+                }
+            }
+            .padding(12)
+        }
+    }
+
     // MARK: - Devices
 
     private var devicesSection: some View {
         Section("Tracked Devices") {
+            devicesContent
+        }
+    }
+
+    private var devicesContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
             ForEach(bluetoothManager.trackedDevices) { device in
                 HStack {
                     Image(systemName: "keyboard")
@@ -59,17 +103,28 @@ struct SettingsView: View {
             }
 
             Button(action: {
-                availableDevices = bluetoothManager.fetchPairedDevices()
-                showingDevicePicker = true
+                guard !isLoadingDevices else { return }
+                isLoadingDevices = true
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let result = bluetoothManager.fetchPairedDevicesForPicker()
+                    DispatchQueue.main.async {
+                        availableDevices = result.devices
+                        pickerMessage = result.message
+                        showingDevicePicker = true
+                        isLoadingDevices = false
+                    }
+                }
             }) {
-                Label("Add Device…", systemImage: "plus")
+                Label(isLoadingDevices ? "Loading Devices..." : "Add Device...", systemImage: "plus")
             }
+            .disabled(isLoadingDevices)
             .sheet(isPresented: $showingDevicePicker) {
                 DevicePickerSheet(
                     available: availableDevices.filter { av in
                         !bluetoothManager.trackedDevices.contains(av)
                     },
                     allFound: availableDevices,
+                    customMessage: pickerMessage,
                     onSelect: { device in
                         bluetoothManager.addTrackedDevice(device)
                         showingDevicePicker = false
@@ -78,12 +133,19 @@ struct SettingsView: View {
                 )
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Network
 
     private var networkSection: some View {
         Section("Network") {
+            networkContent
+        }
+    }
+
+    private var networkContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Peer Mac")
                 Spacer()
@@ -106,34 +168,45 @@ struct SettingsView: View {
                     .foregroundColor(.secondary)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Switch Behavior
 
     private var switchSection: some View {
         Section("Switch Behavior") {
-            VStack(alignment: .leading) {
-                HStack {
-                    Text("Device release delay")
-                    Spacer()
-                    Text(String(format: "%.1f s", settings.switchDelay))
-                        .foregroundColor(.secondary)
-                        .frame(width: 44, alignment: .trailing)
-                }
-                Slider(value: $settings.switchDelay, in: 0.5...3.0, step: 0.5)
-                Text("Time to wait after releasing devices before signaling the peer, so the device becomes discoverable.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
+            switchContent
         }
+    }
+
+    private var switchContent: some View {
+        VStack(alignment: .leading) {
+            HStack {
+                Text("Device release delay")
+                Spacer()
+                Text(String(format: "%.1f s", settings.switchDelay))
+                    .foregroundColor(.secondary)
+                    .frame(width: 44, alignment: .trailing)
+            }
+            Slider(value: $settings.switchDelay, in: 0.5...3.0, step: 0.5)
+            Text("Time to wait after releasing devices before signaling the peer, so the device becomes discoverable.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Launch
 
     private var launchSection: some View {
         Section("Startup") {
-            Toggle("Launch at login", isOn: $settings.launchAtLogin)
+            launchContent
         }
+    }
+
+    private var launchContent: some View {
+        Toggle("Launch at login", isOn: $settings.launchAtLogin)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Actions
@@ -152,10 +225,14 @@ struct SettingsView: View {
 struct DevicePickerSheet: View {
     let available: [TrackedDevice]
     let allFound: [TrackedDevice]
+    let customMessage: String?
     let onSelect: (TrackedDevice) -> Void
     let onDismiss: () -> Void
 
     private var emptyMessage: String {
+        if let customMessage, !customMessage.isEmpty {
+            return customMessage
+        }
         if allFound.isEmpty {
             return "No paired Bluetooth devices found. Make sure your devices are paired in System Settings → Bluetooth."
         }

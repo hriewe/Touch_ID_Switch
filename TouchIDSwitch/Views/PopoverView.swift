@@ -5,14 +5,22 @@ struct PopoverView: View {
     @EnvironmentObject var networkManager: NetworkManager
     @EnvironmentObject var settings: SettingsStore
 
+    let onPerformSwitch: (AppDelegate.SwitchDirection) async -> Void
+
     @State private var showingSettings = false
     @State private var isSwitching = false
 
-    private var appDelegate: AppDelegate? {
-        NSApp.delegate as? AppDelegate
+    var body: some View {
+        Group {
+            if showingSettings {
+                embeddedSettings
+            } else {
+                mainContent
+            }
+        }
     }
 
-    var body: some View {
+    private var mainContent: some View {
         VStack(spacing: 0) {
             header
             Divider()
@@ -23,12 +31,34 @@ struct PopoverView: View {
             actionButtons
         }
         .frame(width: 320)
-        .sheet(isPresented: $showingSettings) {
-            SettingsView()
+    }
+
+    private var embeddedSettings: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button(action: { showingSettings = false }) {
+                    Image(systemName: "chevron.left")
+                        .imageScale(.medium)
+                }
+                .buttonStyle(.plain)
+                .help("Back")
+
+                Text("Settings")
+                    .font(.headline)
+
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            Divider()
+
+            SettingsView(displayMode: .popover)
                 .environmentObject(bluetoothManager)
                 .environmentObject(networkManager)
                 .environmentObject(settings)
         }
+        .frame(width: 420)
     }
 
     // MARK: - Header
@@ -167,7 +197,7 @@ struct PopoverView: View {
             isSwitching = true
             bluetoothManager.lastError = nil
             Task {
-                await appDelegate?.performSwitch(direction: direction)
+                await onPerformSwitch(direction)
                 await MainActor.run { isSwitching = false }
             }
         }) {
