@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var popover: NSPopover!
     private var eventMonitor: Any?
     private var settingsWindow: NSWindow?
+    private var lastIncomingConnectAt: Date?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory) // belt-and-suspenders with LSUIElement
@@ -171,9 +172,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func handleIncomingConnectCommand(addresses: [String]) {
         Task {
+            let now = Date()
+            if let lastIncomingConnectAt,
+               now.timeIntervalSince(lastIncomingConnectAt) < 20 {
+                print("[AppDelegate] Ignoring duplicate incoming connect command")
+                return
+            }
+            lastIncomingConnectAt = now
+
             let delay = UInt64(settingsStore.switchDelay * 1_000_000_000)
             try? await Task.sleep(nanoseconds: delay)
-            await bluetoothManager.connectAllTracked()
+            await bluetoothManager.connectAllTracked(maxAttempts: 1)
         }
     }
 }

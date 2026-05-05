@@ -266,20 +266,19 @@ final class BluetoothManager: NSObject, ObservableObject {
     func connectDevice(_ device: TrackedDevice) async throws {
         if let path = blueutilPath {
             if blueutilConnectionState(device, path: path) == true {
+                print("[BluetoothManager] \(device.name) already connected")
                 return
             }
 
+            print("[BluetoothManager] Connecting \(device.name) via blueutil")
             let status = runBlueutil(path, args: ["--connect", device.macAddress])
             if status == 0,
-               await waitForBlueutilConnectionState(device, path: path, expected: true, timeout: 10) {
+               await waitForStableBlueutilConnectionState(device, path: path, expected: true, timeout: 12) {
+                print("[BluetoothManager] \(device.name) connected and stable")
                 return
             }
 
-            // A second state check catches blueutil builds that return before HID attach completes.
-            if await waitForBlueutilConnectionState(device, path: path, expected: true, timeout: 3) {
-                return
-            }
-
+            print("[BluetoothManager] blueutil connect failed/stale for \(device.name), status \(status)")
             throw BluetoothError.connectionFailed(device.name, status)
         }
 
@@ -293,20 +292,25 @@ final class BluetoothManager: NSObject, ObservableObject {
     func disconnectDevice(_ device: TrackedDevice) async throws {
         if let path = blueutilPath {
             if blueutilConnectionState(device, path: path) == false {
+                print("[BluetoothManager] \(device.name) already disconnected")
                 return
             }
 
+            print("[BluetoothManager] Disconnecting \(device.name) via blueutil")
             let status = runBlueutil(path, args: ["--disconnect", device.macAddress])
             if status == 0,
                await waitForBlueutilConnectionState(device, path: path, expected: false, timeout: 10) {
+                print("[BluetoothManager] \(device.name) disconnected")
                 return
             }
 
             // If the command returned an error but the state still changed, treat it as success.
             if blueutilConnectionState(device, path: path) == false {
+                print("[BluetoothManager] \(device.name) disconnected despite blueutil status \(status)")
                 return
             }
 
+            print("[BluetoothManager] blueutil disconnect failed for \(device.name), status \(status)")
             throw BluetoothError.disconnectionFailed(device.name, status)
         }
 
@@ -373,22 +377,23 @@ final class BluetoothManager: NSObject, ObservableObject {
         updateStatuses()
     }
 
-    func connectAllTracked() async {
+    func connectAllTracked(maxAttempts: Int = 5) async {
         for device in trackedDevices {
             var succeeded = false
-            for attempt in 1...5 {
+            for attempt in 1...maxAttempts {
                 do {
                     try await connectDevice(device)
                     succeeded = true
                     break
                 } catch {
-                    if attempt < 5 {
+                    print("[BluetoothManager] Connect attempt \(attempt) failed for \(device.name): \(error.localizedDescription)")
+                    if attempt < maxAttempts {
                         try? await Task.sleep(nanoseconds: 2_000_000_000)
                     }
                 }
             }
             if !succeeded {
-                await setError("Failed to connect \(device.name) after 5 attempts")
+                await setError("Failed to connect \(device.name) after \(maxAttempts) attempt(s)")
             }
         }
         updateStatuses()
@@ -492,6 +497,32 @@ final class BluetoothManager: NSObject, ObservableObject {
         while Date() < deadline {
             if blueutilConnectionState(device, path: path) == expected {
                 return true
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        return false
+    }
+
+    private func waitForStableBlueutilConnectionState(
+        _ device: TrackedDevice,
+        path: String,
+        expected: Bool,
+        timeout: TimeInterval,
+        stableDuration: TimeInterval = 3
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        var stableSince: Date?
+
+        while Date() < deadline {
+            if blueutilConnectionState(device, path: path) == expected {
+                if stableSince == nil {
+                    stableSince = Date()
+                }
+                if let stableSince, Date().timeIntervalSince(stableSince) >= stableDuration {
+                    return true
+                }
+            } else {
+                stableSince = nil
             }
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
